@@ -91,6 +91,9 @@ import time
 from dataclasses import asdict, dataclass
 from pprint import pformat
 
+import numpy as np
+
+from lerobot.annotators import SubtaskAnnotator, SubtaskAnnotatorConfig
 from lerobot.cameras import CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.reachy2_camera import Reachy2CameraConfig  # noqa: F401
@@ -110,6 +113,7 @@ from lerobot.datasets import (
     create_initial_features,
     safe_stop_image_writer,
 )
+from lerobot.datasets.io_utils import write_subtasks
 from lerobot.processor import (
     RobotAction,
     RobotObservation,
@@ -128,6 +132,7 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     reachy2,
+    so110_follower,
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
@@ -143,6 +148,7 @@ from lerobot.teleoperators import (  # noqa: F401
     openarm_leader,
     openarm_mini,
     reachy2_teleoperator,
+    so110_leader,
     so_leader,
     unitree_g1,
 )
@@ -155,7 +161,12 @@ from lerobot.utils.utils import (
     init_logging,
     log_say,
 )
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+from lerobot.utils.visualization_utils import (
+    init_rerun,
+    log_cv2_data,
+    log_rerun_data,
+    shutdown_cv2_display,
+)
 
 
 @dataclass
@@ -176,6 +187,19 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Optional ESP32-button subtask annotator (writes subtask_index per frame).
+    subtask_annotator: SubtaskAnnotatorConfig | None = None
+    # If True, capture (follower_pos - leader_pos) as an offset at the start of
+    # each recording episode and add it to every subsequent leader action. The
+    # follower then starts exactly at its pre-episode pose (independent of where
+    # the leader is sitting) and tracks the leader's deltas. Applies to the
+    # recording phase only; reset and park phases use raw teleop.
+    relative_zero_offset: bool = False
+    # Visualization backend. "rerun" launches the Rerun viewer with time-series
+    # + image streaming. "cv2" opens a plain OpenCV window per camera — no
+    # server, no scalar/action logging, but rock-solid for just watching the
+    # cameras. Has no effect when display_data=False.
+    display_backend: str = "rerun"
 
     def __post_init__(self):
         if self.teleop is None:
@@ -212,6 +236,20 @@ class RecordConfig:
 """
 
 
+def _apply_relative_zero_offset(act: dict, obs: dict, offset_ref: list) -> dict:
+    """Compute (on first call) and apply per-motor offset so that the leader's
+    initial pose maps to the follower's current observed pose.
+
+    offset_ref: single-element list used as a mutable container. None until the
+    first call; then a dict of {motor_key: float_offset}. Keys are matched by
+    exact name between act and obs; act keys missing from obs get offset 0.
+    """
+    if offset_ref[0] is None:
+        offset_ref[0] = {k: float(obs[k]) - float(act[k]) for k in act.keys() if k in obs}
+    o = offset_ref[0]
+    return {k: (act[k] + o[k] if k in o else act[k]) for k in act}
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -232,7 +270,19 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    subtask_annotator: SubtaskAnnotator | None = None,
+    play_sounds: bool = False,
+    phase: str = "recording",  # "recording" | "reset" | "park"
+    relative_zero_offset: bool = False,
+    rzo_state: list | None = None,
+    display_backend: str = "rerun",
 ):
+    # Offset state: captured once on the first iteration that runs with
+    # relative_zero_offset=True, then reused for all subsequent record_loop
+    # calls (across episodes) so the follower's reference pose is fixed at the
+    # moment teleop begins — not re-zeroed on every episode entry.
+    if rzo_state is None:
+        rzo_state = [None]
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
@@ -266,8 +316,59 @@ def record_loop(
     no_action_count = 0
     timestamp = 0
     start_episode_t = time.perf_counter()
+    prev_subtask_idx = -1  # sentinel so the first iteration fires the initial announcement
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
+
+        if subtask_annotator is not None:
+            subtask_annotator.process_events(events)
+
+        # Translate generic step_forward / step_backward into either a
+        # subtask state change or a phase-exit flag, based on phase + state.
+        if events["step_forward"]:
+            events["step_forward"] = False
+            if (
+                phase == "recording"
+                and subtask_annotator is not None
+                and subtask_annotator.current_index() < len(subtask_annotator.subtasks) - 1
+            ):
+                subtask_annotator.advance()
+            else:
+                events["exit_early"] = True
+
+        if events["step_backward"]:
+            events["step_backward"] = False
+            if (
+                phase == "recording"
+                and subtask_annotator is not None
+                and subtask_annotator.current_index() > 0
+            ):
+                subtask_annotator.undo()
+            elif phase == "park":
+                pass  # no-op: nothing to rerecord during park
+            else:
+                events["rerecord_episode"] = True
+                events["exit_early"] = True
+
+        # Subtask display + announcement: fire only when index actually changes
+        # during recording.
+        if subtask_annotator is not None and phase == "recording":
+            curr_idx = subtask_annotator.current_index()
+            if curr_idx != prev_subtask_idx:
+                curr_name = subtask_annotator.current_subtask()
+                total = len(subtask_annotator.subtasks)
+                log_say(curr_name, play_sounds)
+                if display_data:
+                    try:
+                        import rerun as rr
+
+                        rr.log(
+                            "subtask",
+                            rr.TextDocument(f"[{curr_idx + 1}/{total}] {curr_name}"),
+                        )
+                    except Exception:
+                        pass
+                prev_subtask_idx = curr_idx
 
         if events["exit_early"]:
             events["exit_early"] = False
@@ -287,6 +388,9 @@ def record_loop(
             act = teleop.get_action()
             if robot.name == "unitree_g1":
                 teleop.send_feedback(obs)
+
+            if relative_zero_offset:
+                act = _apply_relative_zero_offset(act, obs, rzo_state)
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
@@ -322,12 +426,21 @@ def record_loop(
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
+            if subtask_annotator is not None:
+                frame["subtask_index"] = np.array(
+                    [subtask_annotator.current_index()], dtype=np.int64
+                )
             dataset.add_frame(frame)
 
         if display_data:
-            log_rerun_data(
-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
-            )
+            if display_backend == "cv2":
+                log_cv2_data(observation=obs_processed)
+            else:
+                log_rerun_data(
+                    observation=obs_processed,
+                    action=action_values,
+                    compress_images=display_compressed_images,
+                )
 
         dt_s = time.perf_counter() - start_loop_t
 
@@ -351,7 +464,7 @@ def record(
 ) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
-    if cfg.display_data:
+    if cfg.display_data and cfg.display_backend != "cv2":
         init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
     display_compressed_images = (
         True
@@ -361,6 +474,14 @@ def record(
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+
+    subtask_annotator = (
+        SubtaskAnnotator(cfg.subtask_annotator) if cfg.subtask_annotator is not None else None
+    )
+
+    # Persistent across all record_loop calls so the relative-zero offset is
+    # captured exactly once and reused for every episode + reset + park.
+    rzo_state: list = [None]
 
     # Fall back to identity pipelines when the caller doesn't supply processors.
     if (
@@ -388,8 +509,23 @@ def record(
         ),
     )
 
+    if subtask_annotator is not None:
+        dataset_features["subtask_index"] = {
+            "dtype": "int64",
+            "shape": (1,),
+            "names": None,
+        }
+
     dataset = None
     listener = None
+
+    # Start the keyboard listener BEFORE anything that loads cv2/av. cv2 and av
+    # both bundle libavdevice and register duplicate Objective-C classes on
+    # import; pynput's CGEventTap setup then crashes inside Cocoa TIS. Starting
+    # pynput first means it attaches to a clean Cocoa runtime and survives the
+    # later duplicate-class warnings.
+    listener, events = init_keyboard_listener()
+    time.sleep(0.5)  # let pynput finish attaching before we load anything else
 
     try:
         if cfg.resume:
@@ -436,8 +572,9 @@ def record(
         robot.connect()
         if teleop is not None:
             teleop.connect()
-
-        listener, events = init_keyboard_listener()
+        if subtask_annotator is not None:
+            subtask_annotator.connect()
+            write_subtasks(subtask_annotator.subtasks, dataset.root)
 
         if not cfg.dataset.streaming_encoding:
             logging.info(
@@ -447,7 +584,10 @@ def record(
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                log_say(f"episode {dataset.num_episodes}", cfg.play_sounds)
+                time.sleep(0.5)  # let the episode number finish before the subtask name fires
+                if subtask_annotator is not None:
+                    subtask_annotator.reset_episode()
                 record_loop(
                     robot=robot,
                     events=events,
@@ -461,6 +601,12 @@ def record(
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    subtask_annotator=subtask_annotator,
+                    play_sounds=cfg.play_sounds,
+                    phase="recording",
+                    relative_zero_offset=cfg.relative_zero_offset,
+                    rzo_state=rzo_state,
+                    display_backend=cfg.display_backend,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -481,6 +627,10 @@ def record(
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        subtask_annotator=subtask_annotator,
+                        phase="reset",
+                        relative_zero_offset=cfg.relative_zero_offset,
+                        rzo_state=rzo_state,
                     )
 
                 if events["rerecord_episode"]:
@@ -492,8 +642,34 @@ def record(
 
                 dataset.save_episode()
                 recorded_episodes += 1
+
+            # Park phase: keep teleop active so the leader can position the
+            # follower at a safe rest pose before torque is dropped on
+            # disconnect. Otherwise robot.disconnect() cuts torque immediately
+            # and a raised arm falls. Right arrow or '6' exits to disconnect.
+            log_say("Park the arm, then press right to disconnect.", cfg.play_sounds)
+            events["exit_early"] = False
+            record_loop(
+                robot=robot,
+                events=events,
+                fps=cfg.dataset.fps,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+                teleop=teleop,
+                control_time_s=3600,
+                single_task=cfg.dataset.single_task,
+                display_data=cfg.display_data,
+                subtask_annotator=subtask_annotator,
+                phase="park",
+                relative_zero_offset=cfg.relative_zero_offset,
+                rzo_state=rzo_state,
+                display_backend=cfg.display_backend,
+            )
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+        if cfg.display_data and cfg.display_backend == "cv2":
+            shutdown_cv2_display()
 
         if dataset:
             dataset.finalize()
@@ -502,6 +678,8 @@ def record(
             robot.disconnect()
         if teleop and teleop.is_connected:
             teleop.disconnect()
+        if subtask_annotator is not None:
+            subtask_annotator.disconnect()
 
         if not is_headless() and listener:
             listener.stop()
