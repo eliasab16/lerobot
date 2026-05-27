@@ -24,6 +24,7 @@ lerobot-setup-motors \
 ```
 """
 
+import re
 from dataclasses import dataclass
 
 import draccus
@@ -35,6 +36,7 @@ from lerobot.robots import (  # noqa: F401
     lekiwi,
     make_robot_from_config,
     omx_follower,
+    so110_follower,
     so_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
@@ -44,6 +46,7 @@ from lerobot.teleoperators import (  # noqa: F401
     make_teleoperator_from_config,
     omx_leader,
     openarm_mini,
+    so110_leader,
     so_leader,
 )
 
@@ -57,6 +60,8 @@ COMPATIBLE_DEVICES = [
     "so100_leader",
     "so101_follower",
     "so101_leader",
+    "so110_follower",
+    "so110_leader",
     "lekiwi",
 ]
 
@@ -65,10 +70,27 @@ COMPATIBLE_DEVICES = [
 class SetupConfig:
     teleop: TeleoperatorConfig | None = None
     robot: RobotConfig | None = None
+    # Comma-separated list of motors to set up (e.g. "elbow_lift_secondary").
+    # Leave unset to set up every motor. Only honored by devices whose
+    # setup_motors() accepts a `motors` kwarg (currently: SO-110).
+    motors: str | None = None
 
     def __post_init__(self):
         if bool(self.teleop) == bool(self.robot):
             raise ValueError("Choose either a teleop or a robot.")
+
+        self.motors_list: list[str] | None = None
+        if self.motors is not None:
+            if not re.fullmatch(r"[\w ,]+", self.motors):
+                raise ValueError(
+                    f"Invalid characters in --motors='{self.motors}'. "
+                    "Use comma-separated names (letters, digits, underscores), e.g. elbow_lift,gripper"
+                )
+            self.motors_list = [m.strip() for m in self.motors.split(",") if m.strip()]
+            if not self.motors_list:
+                raise ValueError(
+                    "--motors flag provided but the list is empty. Remove it or provide at least one name."
+                )
 
         self.device = self.robot if self.robot else self.teleop
 
@@ -83,7 +105,10 @@ def setup_motors(cfg: SetupConfig):
     else:
         device = make_teleoperator_from_config(cfg.device)
 
-    device.setup_motors()
+    if cfg.motors_list is not None:
+        device.setup_motors(motors=cfg.motors_list)
+    else:
+        device.setup_motors()
 
 
 def main():
