@@ -197,6 +197,9 @@ class RolloutConfig:
     device: str | None = None
     task: str = ""
     display_data: bool = False
+    # Display backend: "rerun" (default, full telemetry) or "cv2" (lightweight
+    # camera-only window — avoids Rerun stalls under load).
+    display_backend: str = "rerun"
     # Display data on a remote Rerun server
     display_ip: str | None = None
     # Port of the remote Rerun server

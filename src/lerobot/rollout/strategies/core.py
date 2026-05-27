@@ -26,7 +26,7 @@ from lerobot.utils.action_interpolator import ActionInterpolator
 from lerobot.utils.constants import OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.visualization_utils import log_rerun_data
+from lerobot.utils.visualization_utils import log_cv2_data, log_rerun_data
 
 from ..inference import InferenceEngine
 
@@ -166,11 +166,14 @@ class RolloutStrategy(abc.ABC):
         cfg = runtime_ctx.cfg
         if not cfg.display_data:
             return
-        log_rerun_data(
-            observation=obs_processed,
-            action=action_dict,
-            compress_images=cfg.display_compressed_images,
-        )
+        if cfg.display_backend == "cv2":
+            log_cv2_data(observation=obs_processed)
+        else:
+            log_rerun_data(
+                observation=obs_processed,
+                action=action_dict,
+                compress_images=cfg.display_compressed_images,
+            )
 
     @abc.abstractmethod
     def setup(self, ctx: RolloutContext) -> None:

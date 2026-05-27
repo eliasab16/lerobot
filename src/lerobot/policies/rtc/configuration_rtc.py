@@ -41,7 +41,7 @@ class RTCConfig:
     # Todo change to exp
     prefix_attention_schedule: RTCAttentionSchedule = RTCAttentionSchedule.LINEAR
     max_guidance_weight: float = 10.0
-    execution_horizon: int = 10
+    execution_horizon: int = 20
 
     # Debug settings
     debug: bool = False
