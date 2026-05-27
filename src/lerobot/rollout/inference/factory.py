@@ -14,9 +14,9 @@
 
 """Inference engine configs and factory.
 
-Selection is explicit via ``--inference.type=sync|rtc``.  Adding a new
-backend requires registering its config subclass and dispatching it in
-:func:`create_inference_engine`.
+Selection is explicit via ``--inference.type=sync|rtc|remote``.  Adding a
+new backend requires registering its config subclass and dispatching it
+in :func:`create_inference_engine`.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from lerobot.processor import PolicyProcessorPipeline
 
 from ..robot_wrapper import ThreadSafeRobot
 from .base import InferenceEngine
+from .remote import RemoteInferenceEngine
 from .rtc import RTCInferenceEngine
 from .sync import SyncInferenceEngine
 
@@ -74,6 +75,23 @@ class RTCInferenceConfig(InferenceEngineConfig):
     queue_threshold: int = 30
 
 
+@InferenceEngineConfig.register_subclass("remote")
+@dataclass
+class RemoteInferenceConfig(InferenceEngineConfig):
+    """WebSocket-backed remote inference against a ``lerobot-policy-server``."""
+
+    server_url: str = "ws://localhost:8000"
+    # Device the *server* runs the policy on — independent of the rollout
+    # machine's device. Default cuda; override only if the server box is CPU/MPS.
+    server_device: str = "cuda"
+    rtc: RTCConfig = field(default_factory=RTCConfig)
+    # Required (or set synchronous_mode=True). Validated at engine start.
+    fire_after_n_actions: int | None = None
+    synchronous_mode: bool = False
+    log_actions_csv: str | None = None
+    verbose_transitions: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -92,6 +110,8 @@ def create_inference_engine(
     task: str,
     fps: float,
     device: str | None,
+    pretrained_path: str | None = None,
+    rename_map: dict[str, str] | None = None,
     use_torch_compile: bool = False,
     compile_warmup_inferences: int = 2,
     shutdown_event: Event | None = None,
@@ -124,5 +144,46 @@ def create_inference_engine(
             compile_warmup_inferences=compile_warmup_inferences,
             rtc_queue_threshold=config.queue_threshold,
             shutdown_event=shutdown_event,
+        )
+    if isinstance(config, RemoteInferenceConfig):
+        if not config.synchronous_mode and config.fire_after_n_actions is None:
+            raise ValueError(
+                "RemoteInferenceConfig: set --inference.fire_after_n_actions=<N> "
+                "or --inference.synchronous_mode=true."
+            )
+        if pretrained_path is None:
+            raise ValueError(
+                "RemoteInferenceConfig requires pretrained_path (forwarded by build_rollout_context)."
+            )
+        # The server expects post-rename keys (matches what the policy was
+        # trained on); the client applies the rename before sending.
+        raw_cam_names = [
+            k.removeprefix("observation.images.")
+            for k in hw_features
+            if k.startswith("observation.images.")
+        ]
+        camera_names = []
+        for raw in raw_cam_names:
+            raw_key = f"observation.images.{raw}"
+            renamed = (rename_map or {}).get(raw_key, raw_key)
+            camera_names.append(renamed.removeprefix("observation.images."))
+        return RemoteInferenceEngine(
+            policy_path=pretrained_path,
+            server_url=config.server_url,
+            fps=fps,
+            rtc_config=config.rtc,
+            action_dim=len(ordered_action_keys),
+            camera_names=camera_names,
+            task=task,
+            device=config.server_device,
+            fire_after_n_actions=config.fire_after_n_actions,
+            synchronous_mode=config.synchronous_mode,
+            dataset_features=dataset_features,
+            hw_features=hw_features,
+            ordered_action_keys=ordered_action_keys,
+            rename_map=rename_map,
+            log_actions_csv=config.log_actions_csv,
+            joint_names=ordered_action_keys,
+            verbose_transitions=config.verbose_transitions,
         )
     raise ValueError(f"Unknown inference engine type: {type(config).__name__}")

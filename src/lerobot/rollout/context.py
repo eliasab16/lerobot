@@ -422,6 +422,8 @@ def build_rollout_context(
         task=task_str,
         fps=cfg.fps,
         device=cfg.device,
+        pretrained_path=cfg.policy.pretrained_path,
+        rename_map=cfg.rename_map,
         use_torch_compile=cfg.use_torch_compile,
         compile_warmup_inferences=cfg.compile_warmup_inferences,
         shutdown_event=shutdown_event,
