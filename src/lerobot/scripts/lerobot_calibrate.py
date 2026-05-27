@@ -28,6 +28,7 @@ lerobot-calibrate \
 """
 
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pprint import pformat
 
@@ -46,6 +47,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     omx_follower,
     openarm_follower,
+    so110_follower,
     so_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
@@ -59,6 +61,7 @@ from lerobot.teleoperators import (  # noqa: F401
     omx_leader,
     openarm_leader,
     openarm_mini,
+    so110_leader,
     so_leader,
     unitree_g1,
 )
@@ -70,10 +73,27 @@ from lerobot.utils.utils import init_logging
 class CalibrateConfig:
     teleop: TeleoperatorConfig | None = None
     robot: RobotConfig | None = None
+    # Comma-separated list of motors/joints to calibrate (e.g. "elbow_lift,gripper").
+    # Leave unset to calibrate everything. Only honored by devices whose
+    # calibrate() accepts a `motors` kwarg (currently: SO-110).
+    motors: str | None = None
 
     def __post_init__(self):
         if bool(self.teleop) == bool(self.robot):
             raise ValueError("Choose either a teleop or a robot.")
+
+        self.motors_list: list[str] | None = None
+        if self.motors is not None:
+            if not re.fullmatch(r"[\w ,]+", self.motors):
+                raise ValueError(
+                    f"Invalid characters in --motors='{self.motors}'. "
+                    "Use comma-separated names (letters, digits, underscores), e.g. elbow_lift,gripper"
+                )
+            self.motors_list = [m.strip() for m in self.motors.split(",") if m.strip()]
+            if not self.motors_list:
+                raise ValueError(
+                    "--motors flag provided but the list is empty. Remove it or provide at least one name."
+                )
 
         self.device = self.robot if self.robot else self.teleop
 
@@ -91,7 +111,10 @@ def calibrate(cfg: CalibrateConfig):
     device.connect(calibrate=False)
 
     try:
-        device.calibrate()
+        if cfg.motors_list is not None:
+            device.calibrate(motors=cfg.motors_list)
+        else:
+            device.calibrate()
     finally:
         device.disconnect()
 
