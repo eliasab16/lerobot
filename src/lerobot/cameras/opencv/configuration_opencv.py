@@ -61,6 +61,10 @@ class OpenCVCameraConfig(CameraConfig):
     index_or_path: int | Path
     color_mode: ColorMode = ColorMode.RGB
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
+    # If True, center-crop each frame to a square (side = shorter dimension)
+    # AFTER rotation. The cropped frame is what gets exposed downstream — to
+    # the dataset, the policy, etc. No interpolation or scaling.
+    crop_to_square: bool = False
     warmup_s: int = 1
     fourcc: str | None = None
     backend: Cv2Backends = Cv2Backends.ANY

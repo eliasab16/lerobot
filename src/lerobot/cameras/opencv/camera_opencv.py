@@ -438,6 +438,13 @@ class OpenCVCamera(Camera):
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]:
             processed_image = cv2.rotate(processed_image, self.rotation)
 
+        if getattr(self.config, "crop_to_square", False):
+            ph, pw = processed_image.shape[:2]
+            side = min(ph, pw)
+            y0 = (ph - side) // 2
+            x0 = (pw - side) // 2
+            processed_image = processed_image[y0:y0 + side, x0:x0 + side]
+
         return processed_image
 
     def _read_loop(self) -> None:
