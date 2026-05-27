@@ -80,6 +80,7 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     reachy2,
+    so110_follower,
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
@@ -97,6 +98,7 @@ from lerobot.teleoperators import (  # noqa: F401
     openarm_leader,
     openarm_mini,
     reachy2_teleoperator,
+    so110_leader,
     so_leader,
     unitree_g1,
 )
@@ -122,6 +124,21 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to  display compressed images in Rerun
     display_compressed_images: bool = False
+    # If True, capture (follower_pos - leader_pos) as an offset on the first
+    # teleop iteration and add it to every subsequent leader action. The
+    # follower then starts exactly at its current pose and tracks the leader's
+    # deltas instead of being yanked to the leader's absolute position.
+    relative_zero_offset: bool = False
+
+
+def _apply_relative_zero_offset(act: dict, obs: dict, offset_ref: list) -> dict:
+    """Compute (on first call) and apply per-motor offset so that the leader's
+    initial pose maps to the follower's current observed pose.
+    """
+    if offset_ref[0] is None:
+        offset_ref[0] = {k: float(obs[k]) - float(act[k]) for k in act.keys() if k in obs}
+    o = offset_ref[0]
+    return {k: (act[k] + o[k] if k in o else act[k]) for k in act}
 
 
 def teleop_loop(
@@ -134,7 +151,9 @@ def teleop_loop(
     display_data: bool = False,
     duration: float | None = None,
     display_compressed_images: bool = False,
+    relative_zero_offset: bool = False,
 ):
+    _rzo_offset: list = [None]
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
     pipelines, sends them to a robot, and optionally displays the robot's state. The loop runs at a
@@ -168,6 +187,9 @@ def teleop_loop(
 
         # Get teleop action
         raw_action = teleop.get_action()
+
+        if relative_zero_offset:
+            raw_action = _apply_relative_zero_offset(raw_action, obs, _rzo_offset)
 
         # Process teleop action through pipeline
         teleop_action = teleop_action_processor((raw_action, obs))
@@ -235,6 +257,7 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            relative_zero_offset=cfg.relative_zero_offset,
         )
     except KeyboardInterrupt:
         pass
