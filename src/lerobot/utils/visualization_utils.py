@@ -23,6 +23,99 @@ from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
 from .import_utils import require_package
 
 
+# ---- Lightweight cv2 alternative to Rerun ----------------------------------
+# A bare-bones "show every camera frame in its own OpenCV window" display.
+# No gRPC server, no time-series logging — useful when you only want to see
+# the live camera feeds during recording/teleop and Rerun's overhead or
+# instability gets in the way.
+
+
+def init_cv2_display() -> None:
+    """No-op stub kept for parity with init_rerun()."""
+    return
+
+
+def shutdown_cv2_display() -> None:
+    """Close all OpenCV windows opened by log_cv2_data."""
+    try:
+        import cv2
+
+        cv2.destroyAllWindows()
+        # pump the event loop a few times so windows actually go away on macOS
+        for _ in range(4):
+            cv2.waitKey(1)
+    except Exception:
+        pass
+
+
+_CV2_WINDOW = "cameras"
+
+
+def log_cv2_data(observation: RobotObservation | None = None) -> None:
+    """Composite all image-shaped tensors in `observation` into one tiled
+    OpenCV window (horizontal strip). Each tile is labeled with its key.
+
+    Skips scalars and non-image arrays. Converts CHW -> HWC and RGB -> BGR
+    so the colors look correct. Calls waitKey(1) once to pump OS events.
+    """
+    if not observation:
+        return
+    import cv2
+
+    tiles: list[tuple[str, np.ndarray]] = []
+    for k, v in observation.items():
+        if not isinstance(v, np.ndarray):
+            continue
+        arr = v
+        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+            arr = np.transpose(arr, (1, 2, 0))
+        if arr.ndim != 3 or arr.shape[-1] not in (1, 3, 4):
+            continue
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if arr.shape[-1] == 3:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        elif arr.shape[-1] == 4:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        tiles.append((str(k), arr))
+
+    if not tiles:
+        return
+
+    # Resize every tile to the same height, then concatenate horizontally.
+    target_h = min(t.shape[0] for _, t in tiles)
+    resized: list[np.ndarray] = []
+    for name, t in tiles:
+        if t.shape[0] != target_h:
+            scale = target_h / t.shape[0]
+            t = cv2.resize(t, (int(t.shape[1] * scale), target_h), interpolation=cv2.INTER_AREA)
+        cv2.putText(
+            t,
+            name,
+            (8, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            3,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            t,
+            name,
+            (8, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        resized.append(t)
+
+    mosaic = np.concatenate(resized, axis=1)
+    cv2.imshow(_CV2_WINDOW, mosaic)
+    cv2.waitKey(1)
+
+
 def init_rerun(
     session_name: str = "lerobot_control_loop", ip: str | None = None, port: int | None = None
 ) -> None:
