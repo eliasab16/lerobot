@@ -121,7 +121,7 @@ def predict_action(
     return action
 
 
-def init_keyboard_listener():
+def init_keyboard_listener(skip_pynput: bool = False):
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
 
@@ -141,6 +141,16 @@ def init_keyboard_listener():
     events["exit_early"] = False
     events["rerecord_episode"] = False
     events["stop_recording"] = False
+    events["step_forward"] = False
+    events["step_backward"] = False
+
+    if skip_pynput:
+        # Caller has an alternative input source (e.g. ESP32 button box) and
+        # wants to skip pynput entirely. On macOS, starting pynput without
+        # Accessibility/Input-Monitoring permission aborts the process inside
+        # Cocoa TIS/CGEventTap — so this path is required for headed runs that
+        # don't have that permission granted to the terminal/Python.
+        return None, events
 
     if is_headless():
         logging.warning(
@@ -154,15 +164,22 @@ def init_keyboard_listener():
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
+            char = getattr(key, "char", None)
+            if key == keyboard.Key.right or char == "6":
+                print("Right / '6' pressed. Step forward...")
+                events["step_forward"] = True
+            elif key == keyboard.Key.left or char == "4":
+                print("Left / '4' pressed. Step backward...")
+                events["step_backward"] = True
+            elif key == keyboard.Key.up or char == "8":
+                print("Up / '8' pressed. Skip forward (end phase)...")
                 events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+            elif key == keyboard.Key.down or char == "2":
+                print("Down / '2' pressed. Skip backward (rerecord)...")
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
-            elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
+            elif key == keyboard.Key.esc or char == "7":
+                print("Escape / '7' pressed. Stopping data recording...")
                 events["stop_recording"] = True
                 events["exit_early"] = True
         except Exception as e:
