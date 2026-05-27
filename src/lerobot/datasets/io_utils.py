@@ -194,6 +194,23 @@ def load_subtasks(local_dir: Path) -> pandas.DataFrame | None:
     return None
 
 
+def write_subtasks(subtasks: list[str], local_dir: Path) -> pandas.DataFrame:
+    """Persist an ordered subtask list to meta/subtasks.parquet.
+
+    Row position equals subtask_index — dataset_reader uses ``iloc`` to look up
+    the string from an integer index, so the order on disk must match the
+    indices written into the per-frame ``subtask_index`` column.
+    """
+    df = pd.DataFrame(
+        {"subtask_index": range(len(subtasks))},
+        index=pd.Index(subtasks, name="subtask"),
+    )
+    path = local_dir / DEFAULT_SUBTASKS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path)
+    return df
+
+
 def write_episodes(episodes: Dataset, local_dir: Path) -> None:
     """Write episode metadata to a parquet file in the LeRobot v3.0 format.
     This function writes episode-level metadata to a single parquet file.
