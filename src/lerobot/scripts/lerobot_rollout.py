@@ -174,7 +174,7 @@ from lerobot.teleoperators import (  # noqa: F401
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.utils import init_logging
-from lerobot.utils.visualization_utils import init_rerun
+from lerobot.utils.visualization_utils import init_rerun, shutdown_cv2_display
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ def rollout(cfg: RolloutConfig):
     """Main entry point for policy deployment."""
     init_logging()
 
-    if cfg.display_data:
+    if cfg.display_data and cfg.display_backend != "cv2":
         logger.info("Initializing Rerun visualization (ip=%s, port=%s)", cfg.display_ip, cfg.display_port)
         init_rerun(session_name="rollout", ip=cfg.display_ip, port=cfg.display_port)
 
@@ -211,6 +211,8 @@ def rollout(cfg: RolloutConfig):
         logger.info("Interrupted by user")
     finally:
         strategy.teardown(ctx)
+        if cfg.display_data and cfg.display_backend == "cv2":
+            shutdown_cv2_display()
 
     logger.info("Rollout finished")
 

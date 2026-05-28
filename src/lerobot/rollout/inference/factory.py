@@ -90,6 +90,11 @@ class RemoteInferenceConfig(InferenceEngineConfig):
     synchronous_mode: bool = False
     log_actions_csv: str | None = None
     verbose_transitions: bool = True
+    # When True (default), skip loading the policy weights client-side and use
+    # a config-only stub in the rollout context. Saves ~60s of safetensors +
+    # model-construction time on the rollout box. Set False if some local
+    # consumer needs the actual policy object (e.g. action-space introspection).
+    skip_local_policy_load: bool = True
 
 
 # ---------------------------------------------------------------------------

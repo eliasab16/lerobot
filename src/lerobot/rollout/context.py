@@ -51,6 +51,7 @@ from lerobot.utils.feature_utils import combine_feature_dicts, hw_to_dataset_fea
 from .configs import BaseStrategyConfig, DAggerStrategyConfig, RolloutConfig
 from .inference import (
     InferenceEngine,
+    RemoteInferenceConfig,
     RTCInferenceConfig,
     SyncInferenceConfig,
     create_inference_engine,
@@ -58,6 +59,32 @@ from .inference import (
 from .robot_wrapper import ThreadSafeRobot
 
 logger = logging.getLogger(__name__)
+
+
+class _RemotePolicyStub:
+    """Config-only policy shell for remote inference.
+
+    Remote inference runs the policy on the server; loading weights client-side
+    is wasted I/O (~30s safetensors deserialize + ~30s model construction on
+    a Mac). Downstream code only reads ``.config`` and ``.type`` from the policy
+    when the inference type is ``remote``; this stub satisfies that interface
+    without instantiating the real model.
+
+    Opt out via ``--inference.skip_local_policy_load=false`` to force loading.
+    """
+
+    def __init__(self, config) -> None:
+        self.config = config
+
+    @property
+    def type(self) -> str:
+        return self.config.type
+
+    def eval(self):  # mimic torch.nn.Module API
+        return self
+
+    def to(self, *args, **kwargs):  # mimic torch.nn.Module API
+        return self
 
 
 def _resolve_action_key_order(
@@ -172,9 +199,10 @@ def build_rollout_context(
     fails fast without touching the robot.
     """
     is_rtc = isinstance(cfg.inference, RTCInferenceConfig)
+    is_remote = isinstance(cfg.inference, RemoteInferenceConfig)
+    skip_local_load = is_remote and cfg.inference.skip_local_policy_load
 
     # --- 1. Policy (heavy I/O, but no hardware yet) -------------------
-    logger.info("Loading policy from '%s'...", cfg.policy.pretrained_path)
     policy_config = cfg.policy
     policy_class = get_policy_class(policy_config.type)
 
@@ -187,28 +215,36 @@ def build_rollout_context(
             "Please use `cpu` or `cuda` backend."
         )
 
-    if policy_config.use_peft:
-        from peft import PeftConfig, PeftModel
-
-        peft_path = policy_config.pretrained_path
-        peft_config = PeftConfig.from_pretrained(peft_path)
-        policy = policy_class.from_pretrained(
-            pretrained_name_or_path=peft_config.base_model_name_or_path, config=policy_config
+    if skip_local_load:
+        logger.info(
+            "Remote inference with skip_local_policy_load=True — using config-only "
+            "stub for '%s'", cfg.policy.pretrained_path
         )
-        policy = PeftModel.from_pretrained(policy, peft_path, config=peft_config)
+        policy = _RemotePolicyStub(policy_config)
     else:
-        policy = policy_class.from_pretrained(policy_config.pretrained_path, config=policy_config)
+        logger.info("Loading policy from '%s'...", cfg.policy.pretrained_path)
+        if policy_config.use_peft:
+            from peft import PeftConfig, PeftModel
 
-    if is_rtc:
-        policy.config.rtc_config = cfg.inference.rtc
-        if hasattr(policy, "init_rtc_processor"):
-            policy.init_rtc_processor()
+            peft_path = policy_config.pretrained_path
+            peft_config = PeftConfig.from_pretrained(peft_path)
+            policy = policy_class.from_pretrained(
+                pretrained_name_or_path=peft_config.base_model_name_or_path, config=policy_config
+            )
+            policy = PeftModel.from_pretrained(policy, peft_path, config=peft_config)
+        else:
+            policy = policy_class.from_pretrained(policy_config.pretrained_path, config=policy_config)
 
-    policy = policy.to(cfg.device)
-    policy.eval()
+        if is_rtc:
+            policy.config.rtc_config = cfg.inference.rtc
+            if hasattr(policy, "init_rtc_processor"):
+                policy.init_rtc_processor()
+
+        policy = policy.to(cfg.device)
+        policy.eval()
     logger.info("Policy loaded: type=%s, device=%s", policy_config.type, cfg.device)
 
-    if cfg.use_torch_compile and policy.type not in ("pi0", "pi05"):
+    if cfg.use_torch_compile and not isinstance(policy, _RemotePolicyStub) and policy.type not in ("pi0", "pi05"):
         try:
             if hasattr(torch, "compile"):
                 compile_kwargs = {
